@@ -34,7 +34,9 @@
 }
 
 body.android-mode {
-  background: var(--app-bg);
+  /* style.css (desktop) sets body background transparent !important for the
+     see-through desktop window; without this the phone's colour never applied. */
+  background: var(--app-bg) !important;
   color: var(--text);
   width: 100vw;
   height: 100vh;
@@ -402,7 +404,9 @@ textarea {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 2px 14px 110px;
+  /* Room for the floating + (bottom 94px + 58px) so the last card's buttons
+     can scroll clear of it instead of sitting under it. */
+  padding: 2px 14px 170px;
   display: flex;
   flex-direction: column;
   gap: 14px;

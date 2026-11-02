@@ -641,10 +641,6 @@ function setupEventListeners() {
     updateUI();
   });
 
-  document.getElementById('btn-mesh')!.addEventListener('click', () => {
-    void window.androidActions?.openMeshSheet();
-  });
-
   if (IS_NATIVE_ANDROID && pollHandle === null) {
     pollHandle = window.setInterval(() => {
       if (!document.hidden) {
@@ -804,6 +800,12 @@ function renderApp() {
   });
   document.getElementById('btn-overlay')!.addEventListener('click', () => {
     void window.androidActions?.openOverlay();
+  });
+  // Bound here with its siblings, on every render. It used to be bound once at
+  // start-up, so the first re-render replaced the button with one that had no
+  // handler and Mesh never opened (2026-11-02).
+  document.getElementById('btn-mesh')!.addEventListener('click', () => {
+    void window.androidActions?.openMeshSheet();
   });
   document.getElementById('btn-settings')!.addEventListener('click', () => {
     void reloadSettingsView();
@@ -2149,7 +2151,11 @@ async function openMeshSheet() {
 
   await refreshMeshState();
   renderMeshSheet();
-  await invoke('mesh_modal_open');
+  try {
+    await invoke('mesh_modal_open');
+  } catch (error) {
+    showToast(errorMessage(error));
+  }
   // Re-fetch after modal_open so active_ghost → active transition is reflected immediately
   await refreshMeshState();
   updateMeshSheetState();
@@ -2162,9 +2168,18 @@ async function openMeshSheet() {
 
 async function refreshMeshState() {
   try {
-    meshState = await invoke<MeshState>('mesh_get_state');
-  } catch {
-    // ignore
+    const next = await invoke<MeshState | null | undefined>('mesh_get_state');
+    // An empty or malformed answer used to replace the state with undefined,
+    // and the sheet then crashed on `meshState.role` and never opened.
+    if (next && typeof next === 'object' && typeof next.role === 'string') {
+      meshState = {
+        ...next,
+        pending_devices: Array.isArray(next.pending_devices) ? next.pending_devices : [],
+        active_devices: Array.isArray(next.active_devices) ? next.active_devices : [],
+      };
+    }
+  } catch (error) {
+    console.warn('mesh_get_state failed', error);
   }
 }
 
