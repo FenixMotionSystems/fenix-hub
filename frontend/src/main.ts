@@ -419,6 +419,161 @@ async function loadTransportCapabilities(): Promise<TransportCapabilities> {
     .catch(() => ({ lan: false, airdrop_ready: false, flow: '', ble: { supported: false, enabled: false, permissions_ready: false, adapters: [] }, wifi_direct: { supported: false, enabled: false, permissions_ready: false, adapters: [] }, ble_peers: [], wifi_direct_peers: [], handoff_candidates: [] }));
 }
 
+// ── Custom dropdown (settings only) ───────────────────────────────────────────
+// Replaces the OS-styled <select> popup. The native <select> stays in the DOM,
+// hidden, as the source of truth: picking an option writes its value and fires
+// `change`, so every reader of `select.value` keeps working unchanged.
+
+let openDropdown: { root: HTMLElement; close: () => void } | null = null;
+
+document.addEventListener('pointerdown', (event) => {
+  if (openDropdown && !openDropdown.root.contains(event.target as Node)) openDropdown.close();
+});
+
+function enhanceSelect(select: HTMLSelectElement) {
+  if (select.dataset.enhanced) return;
+  select.dataset.enhanced = '1';
+  select.hidden = true;
+  select.tabIndex = -1;
+
+  const uid = select.id || `dropdown-${Math.random().toString(36).slice(2, 8)}`;
+  const label = escapeHtml(select.getAttribute('aria-label') || '');
+  const root = document.createElement('div');
+  root.className = 'dropdown';
+  root.innerHTML = `
+    <button type="button" class="dropdown-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="${label}">
+      <span class="dropdown-value"></span>
+      <span class="dropdown-chevron" aria-hidden="true">${iconChevronDown(12)}</span>
+    </button>
+    <div class="dropdown-list" role="listbox" id="${uid}-list" aria-label="${label}" tabindex="-1" hidden></div>`;
+  select.insertAdjacentElement('afterend', root);
+
+  const trigger = root.querySelector<HTMLButtonElement>('.dropdown-trigger')!;
+  const valueEl = root.querySelector<HTMLElement>('.dropdown-value')!;
+  const list = root.querySelector<HTMLElement>('.dropdown-list')!;
+
+  const items = Array.from(select.options).map((opt, i) => {
+    const item = document.createElement('div');
+    item.className = 'dropdown-option';
+    item.id = `${uid}-opt-${i}`;
+    item.setAttribute('role', 'option');
+    item.dataset.index = String(i);
+    item.innerHTML = `<span class="dropdown-option-label"></span><span class="dropdown-check" aria-hidden="true">${iconCheckmark(12)}</span>`;
+    item.querySelector<HTMLElement>('.dropdown-option-label')!.textContent = opt.text;
+    list.appendChild(item);
+    return item;
+  });
+
+  let active = -1;
+
+  const sync = () => {
+    const idx = select.selectedIndex;
+    valueEl.textContent = select.options[idx]?.text ?? '';
+    items.forEach((item, i) => {
+      const selected = i === idx;
+      item.setAttribute('aria-selected', String(selected));
+      item.classList.toggle('selected', selected);
+    });
+    trigger.disabled = select.disabled;
+  };
+
+  const setActive = (i: number) => {
+    active = i;
+    items.forEach((item, j) => item.classList.toggle('active', j === i));
+    if (items[i]) {
+      list.setAttribute('aria-activedescendant', items[i].id);
+      items[i].scrollIntoView({ block: 'nearest' });
+    }
+  };
+
+  const close = (returnFocus = false) => {
+    if (openDropdown?.root === root) openDropdown = null;
+    root.classList.remove('open');
+    list.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+    list.removeAttribute('aria-activedescendant');
+    if (returnFocus) trigger.focus();
+  };
+
+  const open = () => {
+    if (select.disabled || items.length === 0) return;
+    if (openDropdown && openDropdown.root !== root) openDropdown.close();
+    openDropdown = { root, close };
+    root.classList.add('open');
+    list.hidden = false;
+    trigger.setAttribute('aria-expanded', 'true');
+    setActive(Math.max(select.selectedIndex, 0));
+    list.focus();
+  };
+
+  const choose = (i: number) => {
+    const opt = select.options[i];
+    if (!opt || opt.disabled) return;
+    if (select.selectedIndex !== i) {
+      select.selectedIndex = i;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    close(true);
+  };
+
+  select.addEventListener('change', sync);
+
+  trigger.addEventListener('click', () => (root.classList.contains('open') ? close() : open()));
+  trigger.addEventListener('keydown', (event) => {
+    if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && !root.classList.contains('open')) {
+      event.preventDefault();
+      open();
+    }
+  });
+
+  list.addEventListener('keydown', (event) => {
+    switch (event.key) {
+      case 'ArrowDown': setActive(Math.min(active + 1, items.length - 1)); break;
+      case 'ArrowUp': setActive(Math.max(active - 1, 0)); break;
+      case 'Home': setActive(0); break;
+      case 'End': setActive(items.length - 1); break;
+      case 'Enter':
+      case ' ': choose(active); break;
+      case 'Escape':
+        // Stop here so Escape closes only the list, not the whole settings window.
+        event.stopPropagation();
+        close(true);
+        break;
+      case 'Tab': close(); return;
+      default: return;
+    }
+    event.preventDefault();
+  });
+
+  list.addEventListener('click', (event) => {
+    const item = (event.target as HTMLElement).closest<HTMLElement>('.dropdown-option');
+    if (item) choose(Number(item.dataset.index));
+  });
+  list.addEventListener('mousemove', (event) => {
+    const item = (event.target as HTMLElement).closest<HTMLElement>('.dropdown-option');
+    if (item && Number(item.dataset.index) !== active) setActive(Number(item.dataset.index));
+  });
+
+  sync();
+}
+
+function enhanceSelects(scope: ParentNode) {
+  scope.querySelectorAll<HTMLSelectElement>('select.settings-select').forEach(enhanceSelect);
+}
+
+// ── Settings layout helpers ───────────────────────────────────────────────────
+
+function settingRow(label: string, hint: string, control: string): string {
+  return `
+    <div class="setting-row">
+      <div class="setting-text">
+        <span class="setting-label">${label}</span>
+        <span class="setting-hint">${hint}</span>
+      </div>
+      <div class="setting-control">${control}</div>
+    </div>`;
+}
+
 function renderSettings(
   profiles: IdentityProfileInfo[],
   transport: TransportCapabilities,
@@ -429,6 +584,17 @@ function renderSettings(
   const profileOptions = profiles.map(profile =>
     `<option value="${escapeHtml(profile.name)}"${profile.active ? ' selected' : ''}>${escapeHtml(profile.name)}${profile.active ? ' · activo' : ''}</option>`
   ).join('');
+  const noProfiles = profiles.length === 0;
+  const bleOn = !!(transport.ble?.supported && transport.ble?.enabled);
+  const wifiOn = !!(transport.wifi_direct?.supported && transport.wifi_direct?.enabled);
+  const pill = (on: boolean) => `<span class="cap-pill ${on ? 'ok' : 'off'}">${on ? 'Disponible' : 'No disponible'}</span>`;
+
+  const deviceTypeSelect = `<select id="settings-device-type" class="settings-select" aria-label="Tipo de dispositivo">
+                ${DEVICE_TYPES.map(dt => `<option value="${dt.id}"${dt.id === selectedType ? ' selected' : ''}>${dt.label}</option>`).join('')}
+              </select>`;
+  const profileSelect = `<select id="settings-profile-select" class="settings-select" aria-label="Perfil guardado" ${noProfiles ? 'disabled' : ''}>
+                ${profileOptions || '<option value="">Sin perfiles</option>'}
+              </select>`;
 
   app.innerHTML = `
     <div class="settings-shell">
@@ -445,120 +611,64 @@ function renderSettings(
 
         <section class="settings-section">
           <h3>Identidad</h3>
-          <div class="settings-grid two-col">
-            <label class="settings-field">
-              <span class="settings-label">Nombre del dispositivo</span>
-              <input id="settings-device-name" type="text" value="${escapeHtml(identity?.device_name || '')}" placeholder="Nombre de este dispositivo" />
-            </label>
-            <label class="settings-field">
-              <span class="settings-label">Tipo</span>
-              <select id="settings-device-type" class="settings-select">
-                ${DEVICE_TYPES.map(dt => `<option value="${dt.id}"${dt.id === selectedType ? ' selected' : ''}>${dt.label}</option>`).join('')}
-              </select>
-            </label>
-          </div>
-
-          <div class="settings-row">
-            <span class="settings-label">Grupo (ID)</span>
-            <span class="settings-value mono settings-group-id" id="group-id-val">${identity?.group_id ?? '—'}</span>
-            <button class="btn-secondary" id="btn-copy-gid">Copiar</button>
-          </div>
-
-          <div class="settings-actions">
-            <button class="btn-secondary" id="btn-apply-identity">Guardar nombre/tipo</button>
-          </div>
-
-          <div class="settings-divider"></div>
-
-          <div class="settings-grid one-col">
-            <label class="settings-field">
-              <span class="settings-label">Cambiar identidad (nuevo grupo, mantiene caché)</span>
-              <div class="password-field">
-                <input id="settings-passphrase" type="password" placeholder="Nueva passphrase del grupo" autocomplete="off" />
-                <button class="password-toggle" id="settings-passphrase-toggle" type="button" aria-label="Mostrar passphrase" aria-pressed="false" title="Mostrar passphrase">
-                  ${iconEye(15)}
-                </button>
-              </div>
-            </label>
-          </div>
-          <div class="settings-actions">
-            <button class="btn-secondary" id="btn-change-group">Cambiar identidad</button>
-          </div>
+          ${settingRow('Nombre del dispositivo', 'Cómo te ven los demás dispositivos',
+            `<input id="settings-device-name" class="setting-input" type="text" aria-label="Nombre del dispositivo" value="${escapeHtml(identity?.device_name || '')}" placeholder="Nombre de este dispositivo" />`)}
+          ${settingRow('Tipo de dispositivo', 'Icono que se muestra a los demás', deviceTypeSelect)}
+          ${settingRow('Grupo (ID)', 'Los dispositivos con el mismo ID forman grupo',
+            `<span class="settings-value mono settings-group-id" id="group-id-val">${identity?.group_id ?? '—'}</span>
+             <button class="btn-secondary" id="btn-copy-gid">Copiar</button>`)}
+          ${settingRow('Guardar nombre y tipo', 'Aplica estos dos cambios a este dispositivo',
+            `<button class="btn-secondary" id="btn-apply-identity">Guardar</button>`)}
+          ${settingRow('Cambiar de grupo', 'Nueva passphrase; mantiene la caché local',
+            `<div class="password-field">
+               <input id="settings-passphrase" type="password" aria-label="Nueva passphrase del grupo" placeholder="Nueva passphrase del grupo" autocomplete="off" />
+               <button class="password-toggle" id="settings-passphrase-toggle" type="button" aria-label="Mostrar passphrase" aria-pressed="false" title="Mostrar passphrase">
+                 ${iconEye(15)}
+               </button>
+             </div>
+             <button class="btn-secondary" id="btn-change-group">Cambiar identidad</button>`)}
         </section>
 
         <section class="settings-section">
           <h3>Perfiles</h3>
-          <div class="settings-grid two-col">
-            <label class="settings-field">
-              <span class="settings-label">Perfil guardado</span>
-              <select id="settings-profile-select" class="settings-select" ${profiles.length === 0 ? 'disabled' : ''}>
-                ${profileOptions || '<option value="">Sin perfiles</option>'}
-              </select>
-            </label>
-            <label class="settings-field">
-              <span class="settings-label">Guardar perfil actual como</span>
-              <input id="settings-profile-name" type="text" placeholder="ej. trabajo" />
-            </label>
-          </div>
-          <div class="settings-actions split">
-            <button class="btn-secondary" id="btn-save-profile">Guardar perfil</button>
-            <button class="btn-secondary" id="btn-activate-profile" ${profiles.length === 0 ? 'disabled' : ''}>Activar perfil</button>
-            <button class="btn-danger ghost" id="btn-delete-profile" ${profiles.length === 0 ? 'disabled' : ''}>Eliminar perfil</button>
-          </div>
+          ${settingRow('Perfil guardado', 'Identidad que usará este dispositivo', profileSelect)}
+          ${settingRow('Acciones sobre el perfil', 'Activa o elimina el perfil seleccionado',
+            `<button class="btn-secondary" id="btn-activate-profile" ${noProfiles ? 'disabled' : ''}>Activar</button>
+             <button class="btn-danger ghost" id="btn-delete-profile" ${noProfiles ? 'disabled' : ''}>Eliminar</button>`)}
+          ${settingRow('Guardar perfil actual', 'Guarda la identidad actual con este nombre',
+            `<input id="settings-profile-name" class="setting-input" type="text" aria-label="Nombre del perfil" placeholder="ej. trabajo" />
+             <button class="btn-secondary" id="btn-save-profile">Guardar</button>`)}
         </section>
 
         <section class="settings-section">
           <h3>Transporte</h3>
-          <div class="transport-grid">
-            <div class="transport-item">
-              <span>LAN</span>
-              <span class="cap-pill ${transport.lan ? 'ok' : 'off'}">${transport.lan ? 'Disponible' : 'No disponible'}</span>
-            </div>
-            <div class="transport-note">IP actual: ${escapeHtml(transport.lan_ip || 'sin enlace LAN')}</div>
-            <div class="transport-item">
-              <span>Bluetooth LE</span>
-              <span class="cap-pill ${transport.ble?.supported && transport.ble?.enabled ? 'ok' : 'off'}">${transport.ble?.supported && transport.ble?.enabled ? 'Disponible' : 'No disponible'}</span>
-            </div>
-            <div class="transport-note">Adaptadores BLE: ${escapeHtml((transport.ble?.adapters || []).join(', ') || 'ninguno detectado')}</div>
-            <div class="transport-item">
-              <span>Wi-Fi Direct</span>
-              <span class="cap-pill ${transport.wifi_direct?.supported && transport.wifi_direct?.enabled ? 'ok' : 'off'}">${transport.wifi_direct?.supported && transport.wifi_direct?.enabled ? 'Disponible' : 'No disponible'}</span>
-            </div>
-            <div class="transport-note">Adaptadores Wi-Fi: ${escapeHtml((transport.wifi_direct?.adapters || []).join(', ') || 'ninguno detectado')}</div>
-            <div class="transport-note">Flujo cercano: ${escapeHtml(transport.flow || 'ble_discovery_then_wifi_direct_transfer')}</div>
-            <div class="transport-note">Modo AirDrop-like: <strong>${transport.airdrop_ready ? 'listo' : 'parcial'}</strong></div>
-          </div>
+          ${settingRow('LAN', `IP actual: ${escapeHtml(transport.lan_ip || 'sin enlace LAN')}`, pill(!!transport.lan))}
+          ${settingRow('Bluetooth LE', `Adaptadores: ${escapeHtml((transport.ble?.adapters || []).join(', ') || 'ninguno detectado')}`, pill(bleOn))}
+          ${settingRow('Wi-Fi Direct', `Adaptadores Wi-Fi: ${escapeHtml((transport.wifi_direct?.adapters || []).join(', ') || 'ninguno detectado')}`, pill(wifiOn))}
+          ${settingRow('Flujo cercano', 'Orden de descubrimiento y transferencia',
+            `<span class="settings-value mono">${escapeHtml(transport.flow || 'ble_discovery_then_wifi_direct_transfer')}</span>`)}
+          ${settingRow('Modo AirDrop-like', 'Transferencia directa entre dispositivos',
+            `<span class="settings-value ${transport.airdrop_ready ? 'ok' : ''}">${transport.airdrop_ready ? 'Listo' : 'Parcial'}</span>`)}
         </section>
 
         <section class="settings-section">
           <h3>Caché</h3>
-          <div class="settings-row">
-            <span class="settings-label">Archivos recibidos</span>
-            <span class="settings-value">FIFO 25 archivos en caché local</span>
-          </div>
-          <div class="settings-actions">
-            <button class="btn-secondary" id="btn-clear-cache">Limpiar caché</button>
-          </div>
+          ${settingRow('Archivos recibidos', 'FIFO de 25 archivos en caché local',
+            `<button class="btn-secondary" id="btn-clear-cache">Limpiar caché</button>`)}
         </section>
 
         <section class="settings-section danger">
           <h3>Zona de peligro</h3>
-          <div class="settings-row danger-row">
-            <span class="settings-label">Eliminar solo identidad y configuración (mantiene caché)</span>
-          </div>
-          <div class="settings-actions split">
-            <button class="btn-danger ghost" id="btn-delete-identity">Eliminar identidad</button>
-          </div>
-          <div class="settings-row danger-row">
-            <span class="settings-label">Eliminar identidad, historial y caché de este dispositivo</span>
-          </div>
-          <div class="settings-actions split">
-            <button class="btn-danger" id="btn-reset">Eliminar todos los datos</button>
-          </div>
+          ${settingRow('Eliminar identidad', 'Borra identidad y configuración; mantiene la caché',
+            `<button class="btn-danger ghost" id="btn-delete-identity">Eliminar identidad</button>`)}
+          ${settingRow('Eliminar todos los datos', 'Borra identidad, historial y caché de este dispositivo',
+            `<button class="btn-danger" id="btn-reset">Eliminar todos los datos</button>`)}
         </section>
       </div>
     </div>
   `;
+
+  enhanceSelects(app);
 
   document.getElementById('btn-settings-close')!.addEventListener('click', async () => {
     await invoke('close_settings');
