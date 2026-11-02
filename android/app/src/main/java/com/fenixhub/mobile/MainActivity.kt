@@ -20,6 +20,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
@@ -91,6 +92,7 @@ class MainActivity : ComponentActivity() {
         webView = createWebView()
         bridge.attach(webView)
         setContentView(webView)
+        installBackHandler()
 
         container.settingsStore.consumeStorageRecoveryMessage()?.let(::toast)
         startServiceIfConfigured()
@@ -125,6 +127,28 @@ class MainActivity : ComponentActivity() {
         pendingRuntimePermissions?.takeIf { it.isActive }?.complete(emptyMap())
         pendingRuntimePermissions = null
         super.onDestroy()
+    }
+
+    /**
+     * The back gesture first asks the web UI to close what is on top (a sheet,
+     * a modal, settings). Only when it answers that nothing is open does the
+     * app leave, as before. Without this, back closed FenixHub even with
+     * settings open (reported 2026-11-02).
+     */
+    private fun installBackHandler() {
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                webView.evaluateJavascript(
+                    "(typeof window.fenixHandleBack === 'function' && window.fenixHandleBack() === true)",
+                ) { handled ->
+                    if (handled != "true") {
+                        isEnabled = false
+                        onBackPressedDispatcher.onBackPressed()
+                        isEnabled = true
+                    }
+                }
+            }
+        })
     }
 
     private fun createWebView(): WebView {

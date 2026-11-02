@@ -1253,7 +1253,7 @@ pub async fn copy_peer_content(
         fenix_hub_core::content::ContentType::Text => {
             let text = String::from_utf8(pulled.bytes).map_err(|e| e.to_string())?;
             tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                arboard::Clipboard::new()?.set_text(text)?;
+                set_clipboard_text(text)?;
                 Ok(())
             })
             .await
@@ -1723,10 +1723,42 @@ fn save_item_to_path(item: &ContentItem, path: &std::path::Path) -> anyhow::Resu
     Ok(())
 }
 
+/// Put text on the system clipboard.
+///
+/// On Linux the clipboard belongs to the program that set it. Creating an
+/// `arboard::Clipboard`, setting text and dropping it hands the text over only
+/// if a clipboard manager grabs it in time; when it doesn't, the copy is lost
+/// and the user has to click "copiar" again (reported 2026-11-02: "many times
+/// I need to click twice"). One handle therefore lives for the whole app.
+pub(crate) fn set_clipboard_text(text: String) -> anyhow::Result<()> {
+    use std::sync::{Mutex, OnceLock};
+    static CLIPBOARD: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
+    let slot = CLIPBOARD.get_or_init(|| Mutex::new(None));
+    let mut guard = slot
+        .lock()
+        .map_err(|_| anyhow::anyhow!("clipboard lock poisoned"))?;
+    if guard.is_none() {
+        *guard = Some(arboard::Clipboard::new()?);
+    }
+    let first_try = guard
+        .as_mut()
+        .expect("clipboard set just above")
+        .set_text(text.clone());
+    if first_try.is_err() {
+        // The handle can go stale (display server restarted): build it again once.
+        *guard = Some(arboard::Clipboard::new()?);
+        guard
+            .as_mut()
+            .expect("clipboard set just above")
+            .set_text(text)?;
+    }
+    Ok(())
+}
+
 fn write_item_to_clipboard(item: &ContentItem) -> anyhow::Result<()> {
     match &item.data {
         ContentData::Text(text) => {
-            arboard::Clipboard::new()?.set_text(text)?;
+            set_clipboard_text(text.clone())?;
         }
         ContentData::FilePath(path) => {
             clipboard_set_file(path, &item.content_type)?;
@@ -1854,7 +1886,7 @@ fn clipboard_set_file_uri(path: &std::path::Path) -> anyhow::Result<()> {
     }
 
     // Fallback: plain text path (works for terminal pastes at least)
-    arboard::Clipboard::new()?.set_text(path.to_string_lossy().to_string())?;
+    set_clipboard_text(path.to_string_lossy().to_string())?;
     Ok(())
 }
 
