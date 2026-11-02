@@ -78,3 +78,7 @@ src-tauri/icons/icon.png
 
 # Local build output (bin/fenix-hub) — not tracked
 bin/
+
+# tsc only type-checks (noEmit); Vite bundles the .ts. A stray .js next to a
+# .ts would win the import and silently ship stale code.
+/frontend/src/*.js
