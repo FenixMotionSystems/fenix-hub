@@ -8,6 +8,12 @@ declare global {
     __fenixResolve?: (id: string, payload: unknown) => void;
     __fenixReject?: (id: string, message: string) => void;
     __fenixExternalRefresh?: () => Promise<void>;
+    /**
+     * Called by the native side on every Android back gesture.
+     * true: the web UI handled it (closed a sheet/modal, or left settings / a secondary tab).
+     * false: nothing to close, the native side may exit the app.
+     */
+    fenixHandleBack: () => boolean;
     androidActions?: {
       broadcast(id: string): Promise<void>;
       stop(id: string): Promise<void>;
@@ -635,10 +641,6 @@ function setupEventListeners() {
     updateUI();
   });
 
-  document.getElementById('btn-mesh')!.addEventListener('click', () => {
-    void window.androidActions?.openMeshSheet();
-  });
-
   if (IS_NATIVE_ANDROID && pollHandle === null) {
     pollHandle = window.setInterval(() => {
       if (!document.hidden) {
@@ -799,6 +801,12 @@ function renderApp() {
   document.getElementById('btn-overlay')!.addEventListener('click', () => {
     void window.androidActions?.openOverlay();
   });
+  // Bound here with its siblings, on every render. It used to be bound once at
+  // start-up, so the first re-render replaced the button with one that had no
+  // handler and Mesh never opened (2026-11-02).
+  document.getElementById('btn-mesh')!.addEventListener('click', () => {
+    void window.androidActions?.openMeshSheet();
+  });
   document.getElementById('btn-settings')!.addEventListener('click', () => {
     void reloadSettingsView();
   });
@@ -875,106 +883,125 @@ function renderSettingsView(
     `<option value="${escapeHtml(profile.name)}"${profile.active ? ' selected' : ''}>${escapeHtml(profile.name)}${profile.active ? ' - activo' : ''}</option>`
   ).join('');
 
+  const profileSelectOptions = profileOptions || '<option value="">Sin perfiles</option>';
+  const deviceTypeOptions = DEVICE_TYPES.map(dt => `<option value="${dt.id}"${dt.id === selectedType ? ' selected' : ''}>${dt.label}</option>`).join('');
+
   app.innerHTML = `
     <div class="a-settings-shell">
       <header class="a-settings-head">
-        <div class="a-settings-title">${iconSettings(18)} Ajustes</div>
-        <button class="a-settings-close" id="btn-settings-close" title="Cerrar">${iconX(12)}</button>
+        <h2 class="a-settings-title">Ajustes</h2>
+        <button class="a-settings-close" id="btn-settings-close" aria-label="Cerrar ajustes" title="Cerrar">${iconX(14)}</button>
       </header>
       <div class="a-settings-body">
         ${feedback ? `<div class="a-settings-feedback ${feedback.tone}">${escapeHtml(feedback.message)}</div>` : ''}
 
         <section class="a-settings-section">
-          <h3>Identidad</h3>
-          <div class="a-settings-grid two">
-            <label class="a-settings-field">
-              <span>Nombre del dispositivo</span>
-              <input id="settings-device-name" type="text" value="${escapeAttribute(identity?.device_name || '')}" placeholder="Nombre de este movil" />
-            </label>
-            <label class="a-settings-field">
-              <span>Tipo</span>
-              <select id="settings-device-type">
-                ${DEVICE_TYPES.map(dt => `<option value="${dt.id}"${dt.id === selectedType ? ' selected' : ''}>${dt.label}</option>`).join('')}
-              </select>
-            </label>
-          </div>
-
-          <div class="a-settings-row">
-            <span>Grupo (ID)</span>
-            <span class="mono">${escapeHtml(identity?.group_id || '---')}</span>
-            <button class="a-settings-btn" id="btn-copy-gid">Copiar</button>
-          </div>
-
-          <div class="a-settings-actions">
-            <button class="a-settings-btn" id="btn-apply-identity">Guardar nombre/tipo</button>
-          </div>
-
-          <label class="a-settings-field">
-            <span>Cambiar identidad (nuevo grupo, mantiene cache)</span>
-            <div class="a-password-field">
-              <input id="settings-passphrase" type="password" placeholder="Nueva passphrase del grupo" autocomplete="off" />
-              <button class="a-password-toggle" id="settings-passphrase-toggle" type="button" aria-label="Mostrar passphrase" aria-pressed="false" title="Mostrar passphrase">
-                ${iconEye(18)}
-              </button>
+          <h3 class="a-settings-section-title">Identidad</h3>
+          <div class="a-settings-group">
+            <div class="a-settings-item">
+              <div class="a-settings-label">Nombre del dispositivo</div>
+              <div class="a-settings-hint">Así aparece este móvil ante los demás dispositivos.</div>
+              <input class="a-settings-input" id="settings-device-name" type="text" value="${escapeAttribute(identity?.device_name || '')}" placeholder="Nombre de este movil" />
             </div>
-          </label>
-
-          <div class="a-settings-actions">
-            <button class="a-settings-btn" id="btn-change-group">Cambiar identidad</button>
+            <div class="a-settings-item">
+              <div class="a-settings-label">Tipo de dispositivo</div>
+              <div class="a-settings-hint">Etiqueta de tipo para este dispositivo.</div>
+              ${customSelectMarkup('settings-device-type', 'Tipo de dispositivo', deviceTypeOptions, false)}
+            </div>
+            <div class="a-settings-item">
+              <div class="a-settings-label">ID de grupo</div>
+              <div class="a-settings-hint">Los dispositivos con el mismo ID están en la misma red.</div>
+              <div class="a-settings-inline">
+                <span class="a-settings-value mono">${escapeHtml(identity?.group_id || '---')}</span>
+                <button class="a-settings-btn" id="btn-copy-gid">Copiar</button>
+              </div>
+            </div>
+            <div class="a-settings-item a-settings-item-action">
+              <button class="a-settings-btn primary" id="btn-apply-identity">Guardar nombre y tipo</button>
+            </div>
+            <div class="a-settings-item">
+              <div class="a-settings-label">Cambiar de grupo</div>
+              <div class="a-settings-hint">Nueva frase de acceso. Guarda la identidad actual como perfil y mantiene la cache.</div>
+              <div class="a-password-field">
+                <input class="a-settings-input" id="settings-passphrase" type="password" placeholder="Nueva passphrase del grupo" autocomplete="off" />
+                <button class="a-password-toggle" id="settings-passphrase-toggle" type="button" aria-label="Mostrar passphrase" aria-pressed="false" title="Mostrar passphrase">
+                  ${iconEye(18)}
+                </button>
+              </div>
+            </div>
+            <div class="a-settings-item a-settings-item-action">
+              <button class="a-settings-btn" id="btn-change-group">Cambiar identidad</button>
+            </div>
           </div>
         </section>
 
         <section class="a-settings-section">
-          <h3>Perfiles</h3>
-          <div class="a-settings-grid two">
-            <label class="a-settings-field">
-              <span>Perfil guardado</span>
-              <select id="settings-profile-select" ${profiles.length === 0 ? 'disabled' : ''}>
-                ${profileOptions || '<option value="">Sin perfiles</option>'}
-              </select>
-            </label>
-            <label class="a-settings-field">
-              <span>Guardar perfil actual como</span>
-              <input id="settings-profile-name" type="text" placeholder="ej. trabajo" />
-            </label>
-          </div>
-          <div class="a-settings-actions split">
-            <button class="a-settings-btn" id="btn-save-profile">Guardar perfil</button>
-            <button class="a-settings-btn" id="btn-activate-profile" ${profiles.length === 0 ? 'disabled' : ''}>Activar perfil</button>
-            <button class="a-settings-btn danger" id="btn-delete-profile" ${profiles.length === 0 ? 'disabled' : ''}>Eliminar perfil</button>
-          </div>
-        </section>
-
-        <section class="a-settings-section">
-          <h3>Transporte</h3>
-          <div class="a-settings-transport">
-            <div>LAN: <strong>${transport.lan ? 'Disponible' : 'No disponible'}</strong></div>
-            <div>IP: ${escapeHtml(transport.lan_ip || 'sin enlace LAN')}</div>
-            <div>Bluetooth LE: <strong>${transport.ble?.supported && transport.ble?.enabled ? 'Disponible' : 'No disponible'}</strong></div>
-            <div>Adaptadores BLE: ${escapeHtml((transport.ble?.adapters || []).join(', ') || 'ninguno')}</div>
-            <div>Wi-Fi Direct: <strong>${transport.wifi_direct?.supported && transport.wifi_direct?.enabled ? 'Disponible' : 'No disponible'}</strong></div>
-            <div>Adaptadores Wi-Fi: ${escapeHtml((transport.wifi_direct?.adapters || []).join(', ') || 'ninguno')}</div>
-            <div>Flujo: ${escapeHtml(transport.flow || 'ble_discovery_then_wifi_direct_transfer')}</div>
-            <div>Modo AirDrop-like: <strong>${transport.airdrop_ready ? 'listo' : 'parcial'}</strong></div>
+          <h3 class="a-settings-section-title">Perfiles</h3>
+          <div class="a-settings-group">
+            <div class="a-settings-item">
+              <div class="a-settings-label">Perfil guardado</div>
+              <div class="a-settings-hint">Identidades guardadas en este móvil.</div>
+              ${customSelectMarkup('settings-profile-select', 'Perfil guardado', profileSelectOptions, profiles.length === 0)}
+            </div>
+            <div class="a-settings-item">
+              <div class="a-settings-label">Guardar perfil actual</div>
+              <div class="a-settings-hint">Escribe un nombre para guardar la identidad actual.</div>
+              <div class="a-settings-inline">
+                <input class="a-settings-input" id="settings-profile-name" type="text" placeholder="ej. trabajo" />
+                <button class="a-settings-btn" id="btn-save-profile">Guardar</button>
+              </div>
+            </div>
+            <div class="a-settings-item a-settings-item-action a-settings-actions">
+              <button class="a-settings-btn" id="btn-activate-profile" ${profiles.length === 0 ? 'disabled' : ''}>Activar perfil</button>
+              <button class="a-settings-btn danger" id="btn-delete-profile" ${profiles.length === 0 ? 'disabled' : ''}>Eliminar perfil</button>
+            </div>
           </div>
         </section>
 
         <section class="a-settings-section">
-          <h3>Cache</h3>
-          <div class="a-settings-actions">
-            <button class="a-settings-btn" id="btn-clear-cache">Limpiar cache</button>
+          <h3 class="a-settings-section-title">Transporte</h3>
+          <div class="a-settings-group">
+            <div class="a-settings-kv"><span>LAN</span><strong>${transport.lan ? 'Disponible' : 'No disponible'}</strong></div>
+            <div class="a-settings-kv"><span>IP</span><strong>${escapeHtml(transport.lan_ip || 'sin enlace LAN')}</strong></div>
+            <div class="a-settings-kv"><span>Bluetooth LE</span><strong>${transport.ble?.supported && transport.ble?.enabled ? 'Disponible' : 'No disponible'}</strong></div>
+            <div class="a-settings-kv"><span>Adaptadores BLE</span><strong>${escapeHtml((transport.ble?.adapters || []).join(', ') || 'ninguno')}</strong></div>
+            <div class="a-settings-kv"><span>Wi-Fi Direct</span><strong>${transport.wifi_direct?.supported && transport.wifi_direct?.enabled ? 'Disponible' : 'No disponible'}</strong></div>
+            <div class="a-settings-kv"><span>Adaptadores Wi-Fi</span><strong>${escapeHtml((transport.wifi_direct?.adapters || []).join(', ') || 'ninguno')}</strong></div>
+            <div class="a-settings-kv"><span>Flujo</span><strong>${escapeHtml(transport.flow || 'ble_discovery_then_wifi_direct_transfer')}</strong></div>
+            <div class="a-settings-kv"><span>Modo AirDrop-like</span><strong>${transport.airdrop_ready ? 'listo' : 'parcial'}</strong></div>
+          </div>
+        </section>
+
+        <section class="a-settings-section">
+          <h3 class="a-settings-section-title">Cache</h3>
+          <div class="a-settings-group">
+            <div class="a-settings-item a-settings-item-action">
+              <div class="a-settings-label">Cache local</div>
+              <div class="a-settings-hint">Borra los contenidos recibidos guardados en este móvil.</div>
+              <button class="a-settings-btn" id="btn-clear-cache">Limpiar cache</button>
+            </div>
           </div>
         </section>
 
         <section class="a-settings-section danger-zone">
-          <h3>Zona de peligro</h3>
-          <div class="a-settings-actions split">
-            <button class="a-settings-btn danger" id="btn-delete-identity">Eliminar identidad</button>
-            <button class="a-settings-btn danger solid" id="btn-reset">Eliminar todos los datos</button>
+          <h3 class="a-settings-section-title">Zona de peligro</h3>
+          <div class="a-settings-group">
+            <div class="a-settings-item a-settings-item-action">
+              <div class="a-settings-label">Eliminar identidad</div>
+              <div class="a-settings-hint">Quita el grupo actual. La cache local se mantiene.</div>
+              <button class="a-settings-btn danger" id="btn-delete-identity">Eliminar identidad</button>
+            </div>
+            <div class="a-settings-item a-settings-item-action">
+              <div class="a-settings-label">Eliminar todos los datos</div>
+              <div class="a-settings-hint">Borra identidad, perfiles y cache de este móvil.</div>
+              <button class="a-settings-btn danger solid" id="btn-reset">Eliminar todos los datos</button>
+            </div>
           </div>
         </section>
       </div>
     </div>`;
+
+  bindCustomSelects(app);
 
   document.getElementById('btn-settings-close')!.addEventListener('click', () => {
     void returnToHubView();
@@ -1118,6 +1145,64 @@ function renderSettingsView(
     await invoke('reset_all_data');
     await returnToHubView();
     showToast('Todos los datos locales han sido eliminados.');
+  });
+}
+
+// Custom dropdown: the native <select> stays in the DOM (hidden) so its value and
+// change events keep working for existing handlers; the button only drives it.
+function customSelectMarkup(selectId: string, label: string, optionsHtml: string, disabled: boolean) {
+  return `
+    <button type="button" class="a-select" data-select-trigger="${selectId}" data-select-label="${escapeAttribute(label)}" aria-haspopup="dialog" ${disabled ? 'disabled' : ''}>
+      <span class="a-select-value"></span>
+      <span class="a-select-caret" aria-hidden="true"></span>
+    </button>
+    <select id="${selectId}" class="a-hidden-input" tabindex="-1" aria-hidden="true" ${disabled ? 'disabled' : ''}>${optionsHtml}</select>`;
+}
+
+function bindCustomSelects(root: HTMLElement) {
+  root.querySelectorAll<HTMLButtonElement>('[data-select-trigger]').forEach(trigger => {
+    const select = document.getElementById(trigger.dataset.selectTrigger || '') as HTMLSelectElement | null;
+    if (!select) return;
+
+    const sync = () => {
+      const option = select.selectedOptions[0];
+      const valueEl = trigger.querySelector('.a-select-value');
+      if (valueEl) valueEl.textContent = option?.textContent?.trim() || '---';
+      trigger.disabled = select.disabled;
+    };
+    sync();
+    select.addEventListener('change', sync);
+
+    trigger.addEventListener('click', () => {
+      openSelectSheet(select, trigger.dataset.selectLabel || 'Elegir');
+    });
+  });
+}
+
+function openSelectSheet(select: HTMLSelectElement, title: string) {
+  const options = [...select.options];
+  const backdrop = createSheet(`
+    <div class="a-sheet-handle"></div>
+    <div class="a-sheet-title">${escapeHtml(title)}</div>
+    <div class="a-sheet-list">
+      ${options.map((option, index) => `
+        <button class="a-sheet-btn option${option.selected ? ' selected' : ''}" data-index="${index}" ${option.disabled ? 'disabled' : ''}>
+          <span>${escapeHtml(option.textContent?.trim() || '')}</span>
+          ${option.selected ? iconCheck(18) : ''}
+        </button>`).join('')}
+    </div>
+    <button class="a-sheet-btn quiet" data-action="cancel">Cancelar</button>
+  `);
+
+  backdrop.querySelector<HTMLButtonElement>('[data-action="cancel"]')?.addEventListener('click', () => backdrop.remove());
+  backdrop.querySelectorAll<HTMLButtonElement>('.a-sheet-btn.option').forEach(button => {
+    button.addEventListener('click', () => {
+      const option = options[Number(button.dataset.index)];
+      backdrop.remove();
+      if (!option || select.value === option.value) return;
+      select.value = option.value;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
   });
 }
 
@@ -1297,7 +1382,7 @@ function openAddSheet() {
     <button class="a-sheet-btn" data-action="text">${iconText(20)} Texto rápido</button>
     <button class="a-sheet-btn" data-action="clipboard">${iconClipboard(20)} Portapapeles actual</button>
     <button class="a-sheet-btn" data-action="file">${iconFile(20)} Archivo o imagen</button>
-    <button class="a-sheet-btn danger" data-action="cancel">Cancelar</button>
+    <button class="a-sheet-btn quiet" data-action="cancel">Cancelar</button>
   `);
 
   const close = () => backdrop.remove();
@@ -1328,8 +1413,8 @@ function openTextComposer() {
     <p class="a-sheet-copy">Escribe, pega y lánzalo al hub local.</p>
     <textarea class="a-sheet-textarea" id="a-quick-text" placeholder="Escribe o pega aquí"></textarea>
     <div class="a-sheet-row">
-      <button class="a-sheet-btn danger" data-action="cancel">Cancelar</button>
-      <button class="a-sheet-btn" data-action="save">${iconCheck(18)} Guardar</button>
+      <button class="a-sheet-btn quiet" data-action="cancel">Cancelar</button>
+      <button class="a-sheet-btn primary" data-action="save">${iconCheck(16)} Enviar</button>
     </div>
   `);
 
@@ -1387,7 +1472,7 @@ function openDirectSheet(contentId: string) {
     <div class="a-sheet-title">Enviar directamente</div>
     <p class="a-sheet-copy">Selecciona el dispositivo destino para este contenido.</p>
     ${deviceButtons}
-    <button class="a-sheet-btn danger" data-action="cancel">Cancelar</button>
+    <button class="a-sheet-btn quiet" data-action="cancel">Cancelar</button>
   `);
 
   const close = () => backdrop.remove();
@@ -1417,7 +1502,7 @@ function openReceiveSheet(contentId: string) {
     <button class="a-sheet-btn" data-action="import">${iconInbox(20)} Guardar en hub temporal</button>
     <button class="a-sheet-btn" data-action="copy">${iconClipboard(20)} ${copyPeerActionLabel(peer.content_type)}</button>
     <button class="a-sheet-btn" data-action="save-as">${iconFile(20)} ${saveAsPeerActionLabel(peer.content_type)}</button>
-    <button class="a-sheet-btn danger" data-action="cancel">Cancelar</button>
+    <button class="a-sheet-btn quiet" data-action="cancel">Cancelar</button>
   `);
 
   const close = () => backdrop.remove();
@@ -1669,6 +1754,33 @@ window.androidActions = {
   async openMeshSheet() {
     await openMeshSheet();
   },
+};
+
+// Android back gesture contract: see the Window declaration above.
+// Order: topmost sheet/modal -> settings view -> secondary tab -> exit (false).
+window.fenixHandleBack = () => {
+  const sheets = document.querySelectorAll<HTMLElement>('.a-sheet-backdrop');
+  const topmost = sheets[sheets.length - 1];
+  if (topmost) {
+    if (topmost.querySelector('#mesh-close')) {
+      closeMeshSheet();
+    } else {
+      topmost.remove();
+    }
+    return true;
+  }
+
+  if (document.querySelector('.a-settings-shell')) {
+    returnToHubView().catch(error => console.error(error));
+    return true;
+  }
+
+  if (activeTab !== 'local' && document.querySelector('.a-nav-btn')) {
+    switchTab('local');
+    return true;
+  }
+
+  return false;
 };
 
 function updateLocalItem(id: string, mutate: (item: ContentItem) => ContentItem) {
@@ -1949,7 +2061,7 @@ function showIncomingInviteModal(invite: IncomingInvite) {
     <p class="a-direct-invite-sub">Grupo: ${escapeHtml(invite.ephemeralGroupId)}</p>
     <div class="a-sheet-row">
       <button class="a-sheet-btn danger" data-action="reject">Rechazar</button>
-      <button class="a-sheet-btn" data-action="accept">${iconCheck(16)} Unirse y recibir</button>
+      <button class="a-sheet-btn primary" data-action="accept">${iconCheck(16)} Unirse y recibir</button>
     </div>
   `);
 
@@ -2039,7 +2151,11 @@ async function openMeshSheet() {
 
   await refreshMeshState();
   renderMeshSheet();
-  await invoke('mesh_modal_open');
+  try {
+    await invoke('mesh_modal_open');
+  } catch (error) {
+    showToast(errorMessage(error));
+  }
   // Re-fetch after modal_open so active_ghost → active transition is reflected immediately
   await refreshMeshState();
   updateMeshSheetState();
@@ -2052,9 +2168,18 @@ async function openMeshSheet() {
 
 async function refreshMeshState() {
   try {
-    meshState = await invoke<MeshState>('mesh_get_state');
-  } catch {
-    // ignore
+    const next = await invoke<MeshState | null | undefined>('mesh_get_state');
+    // An empty or malformed answer used to replace the state with undefined,
+    // and the sheet then crashed on `meshState.role` and never opened.
+    if (next && typeof next === 'object' && typeof next.role === 'string') {
+      meshState = {
+        ...next,
+        pending_devices: Array.isArray(next.pending_devices) ? next.pending_devices : [],
+        active_devices: Array.isArray(next.active_devices) ? next.active_devices : [],
+      };
+    }
+  } catch (error) {
+    console.warn('mesh_get_state failed', error);
   }
 }
 
@@ -2066,8 +2191,7 @@ function closeMeshSheet() {
     clearInterval(meshRefreshInterval);
     meshRefreshInterval = null;
   }
-  const backdrop = document.getElementById('a-sheet-backdrop');
-  backdrop?.remove();
+  document.getElementById('mesh-close')?.closest('.a-sheet-backdrop')?.remove();
 }
 
 function renderMeshSheet() {
